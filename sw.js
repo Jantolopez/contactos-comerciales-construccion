@@ -1,5 +1,5 @@
 /* Contactos Comerciales Construcción — funciona sin conexión: guarda en el móvil la app y el lector de texto. */
-var VERSION = "ccc-v2";
+var VERSION = "ccc-v3";
 var SHELL = ["./", "index.html", "app.js", "parse.js", "manifest.webmanifest", "icons/icon-192.png", "icons/icon-512.png"];
 var HEAVY = ["vendor/tesseract.min.js", "vendor/worker.min.js", "vendor/core/tesseract-core-simd-lstm.wasm.js", "vendor/core/tesseract-core-lstm.wasm.js", "lang/spa.traineddata.gz"];
 

@@ -152,21 +152,37 @@
 
   /* ---------- Búsqueda por voz ---------- */
   var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (SR) {
-    var mic = $("#mic"), rec = null; mic.hidden = false;
-    mic.onclick = function () {
-      if (rec) { rec.stop(); return; }
-      rec = new SR(); rec.lang = "es-ES"; rec.interimResults = false; rec.maxAlternatives = 1;
-      mic.classList.add("live"); toast("Di el nombre, el apellido o la empresa");
-      rec.onresult = function (ev) {
-        var t = ev.results[0][0].transcript.replace(/[.,]/g, "").trim();
-        $("#q").value = t; query = t; openId = null; render();
-      };
-      rec.onerror = function (ev) { if (ev.error === "not-allowed") toast("Permite el micrófono para buscar por voz."); else if (ev.error !== "aborted" && ev.error !== "no-speech") toast("No te he entendido. Prueba otra vez."); };
-      rec.onend = function () { mic.classList.remove("live"); rec = null; };
-      try { rec.start(); } catch (e) { mic.classList.remove("live"); rec = null; }
+  var mic = $("#mic"), rec = null, heard = false;
+  mic.hidden = false;
+  var VOZ = {
+    "not-allowed": "Chrome no tiene permiso para usar el micrófono. Actívalo en Ajustes del móvil > Aplicaciones > Chrome > Permisos > Micrófono.",
+    "service-not-allowed": "El reconocimiento de voz del móvil está desactivado. Usa el micrófono del teclado: toca el buscador y pulsa el micrófono del teclado.",
+    "network": "La búsqueda por voz necesita conexión a internet.",
+    "audio-capture": "No se encuentra el micrófono. Comprueba que ninguna otra app lo está usando.",
+    "language-not-supported": "El reconocimiento de voz no admite español en este móvil. Usa el micrófono del teclado."
+  };
+  function stopMic() { mic.classList.remove("live"); mic.setAttribute("aria-label", "Buscar por voz"); rec = null; }
+  mic.onclick = function () {
+    if (!SR) { $("#q").focus(); toast("Toca el micrófono del teclado y di el nombre, el apellido o la empresa."); return; }
+    if (rec) { try { rec.stop(); } catch (e) {} return; }
+    heard = false;
+    rec = new SR(); rec.lang = "es-ES"; rec.interimResults = true; rec.continuous = false; rec.maxAlternatives = 1;
+    rec.onstart = function () { mic.classList.add("live"); mic.setAttribute("aria-label", "Dejar de escuchar"); toast("Te escucho… di el nombre, el apellido o la empresa"); };
+    rec.onresult = function (ev) {
+      var t = "";
+      for (var i = 0; i < ev.results.length; i++) t += ev.results[i][0].transcript;
+      t = t.replace(/[.,¿?¡!]/g, "").trim();
+      if (!t) return;
+      heard = true; $("#q").value = t; query = t; openId = null; render();
     };
-  }
+    rec.onerror = function (ev) {
+      if (ev.error === "aborted") return;
+      if (ev.error === "no-speech") { heard = true; toast("No he oído nada. Pulsa el micrófono y habla cerca del móvil."); return; }
+      heard = true; toast(VOZ[ev.error] || "No ha funcionado la voz (" + ev.error + "). Usa el micrófono del teclado.");
+    };
+    rec.onend = function () { var h = heard; stopMic(); if (!h) toast("No he entendido nada. Prueba otra vez o usa el micrófono del teclado."); };
+    try { rec.start(); } catch (e) { stopMic(); toast("No se pudo activar la voz. Usa el micrófono del teclado."); }
+  };
 
   /* ---------- Formulario ---------- */
   var FIELDS = [["nombre", "Nombre", "text"], ["apellidos", "Apellidos", "text"], ["cargo", "Cargo", "text"], ["empresa", "Empresa", "text"],
