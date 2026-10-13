@@ -288,15 +288,25 @@
     if (l) l.textContent = label;
     if (b) b.style.width = Math.max(4, Math.min(100, pct)) + "%";
   }
-  async function toCanvas(file) {
-    var bmp;
-    try { bmp = await createImageBitmap(file, { imageOrientation: "from-image" }); }
-    catch (e) { bmp = await new Promise(function (ok, ko) { var i = new Image(); i.onload = function () { ok(i); }; i.onerror = ko; i.src = URL.createObjectURL(file); }); }
-    var w = bmp.width, h = bmp.height, k = Math.min(1, 1800 / Math.max(w, h));
+  async function loadBitmap(file) {
+    try { return await createImageBitmap(file, { imageOrientation: "from-image" }); }
+    catch (e) { return await new Promise(function (ok, ko) { var i = new Image(); i.onload = function () { ok(i); }; i.onerror = ko; i.src = URL.createObjectURL(file); }); }
+  }
+  function scaled(src, maxSide) {
+    var w = src.width, h = src.height, k = Math.min(1, maxSide / Math.max(w, h));
     var c = document.createElement("canvas"); c.width = Math.round(w * k); c.height = Math.round(h * k);
-    var g = c.getContext("2d"); g.drawImage(bmp, 0, 0, c.width, c.height);
-    var img = g.getImageData(0, 0, c.width, c.height), p = img.data;
-    for (var i = 0; i < p.length; i += 4) { var y = 0.299 * p[i] + 0.587 * p[i + 1] + 0.114 * p[i + 2]; p[i] = p[i + 1] = p[i + 2] = y; }
+    var g = c.getContext("2d"); g.imageSmoothingQuality = "high"; g.drawImage(src, 0, 0, c.width, c.height);
+    return c;
+  }
+  /* Escala de grises y estirado de contraste (percentiles 1 % y 99 %): ayuda con tarjetas grises o fotos con poca luz. */
+  function enhance(c) {
+    var g = c.getContext("2d"), img = g.getImageData(0, 0, c.width, c.height), p = img.data, hist = new Uint32Array(256), n = p.length / 4;
+    for (var i = 0; i < p.length; i += 4) { var y = (0.299 * p[i] + 0.587 * p[i + 1] + 0.114 * p[i + 2]) | 0; p[i] = y; hist[y]++; }
+    var lo = 0, hi = 255, acc = 0;
+    for (lo = 0; lo < 255; lo++) { acc += hist[lo]; if (acc > n * 0.01) break; }
+    acc = 0; for (hi = 255; hi > 0; hi--) { acc += hist[hi]; if (acc > n * 0.01) break; }
+    var span = Math.max(1, hi - lo);
+    for (i = 0; i < p.length; i += 4) { var v = Math.max(0, Math.min(255, (p[i] - lo) * 255 / span)); p[i] = p[i + 1] = p[i + 2] = v; }
     g.putImageData(img, 0, 0);
     return c;
   }
@@ -308,10 +318,31 @@
     return c;
   }
   function thumb(src) {
-    var k = Math.min(1, 600 / Math.max(src.width, src.height)), c = document.createElement("canvas");
-    c.width = Math.round(src.width * k); c.height = Math.round(src.height * k);
-    c.getContext("2d").drawImage(src, 0, 0, c.width, c.height);
+    var c = scaled(src, 600);
     return c.toDataURL("image/jpeg", 0.7);
+  }
+  function words(data) {
+    var out = [];
+    (data.lines || []).forEach(function (l) { (l.words || []).forEach(function (w) { out.push(w); }); });
+    return out;
+  }
+  /* Puntuación de una lectura: caracteres de palabras leídas con seguridad. */
+  function score(data) {
+    return words(data).reduce(function (s, w) { return s + (w.confidence >= 70 && /[A-Za-z0-9]{2,}/.test(w.text) ? w.text.length : 0); }, 0);
+  }
+  /* Líneas de texto quitando las palabras que el lector marca como muy dudosas (iconos, QR, logos). */
+  function linesFrom(data) {
+    var ls = (data.lines || []).map(function (l) {
+      var h = l.bbox ? l.bbox.y1 - l.bbox.y0 : 0;
+      if (!l.words || !l.words.length) return { text: l.text, h: h };
+      var ws = l.words.filter(function (w) { return w.confidence >= 45; });
+      if (!ws.length) return null;
+      var avg = ws.reduce(function (s, w) { return s + w.confidence; }, 0) / ws.length;
+      var text = ws.map(function (w) { return w.text; }).join(" ");
+      if (avg < 60 && !/[\d@]|www|\.(com|es|net|org)/i.test(text)) return null;
+      return { text: text, h: h };
+    }).filter(Boolean);
+    return ls;
   }
   var cancelled = false;
   async function scan(file) {
@@ -319,29 +350,63 @@
     busy('<h2>Leyendo la tarjeta</h2><p id="p-label">Preparando la foto…</p><div class="progress"><i id="p-bar"></i></div><button class="btn" type="button" id="b-cancel">Cancelar</button>');
     $("#b-cancel").onclick = function () { cancelled = true; $("#busy").hidden = true; };
     try {
-      var base = await toCanvas(file);
-      var first = !worker;
-      setProgress(first ? "Preparando el lector (solo la primera vez, unos segundos)…" : "Leyendo…", 8);
+      var bmp = await loadBitmap(file);
+      var full = scaled(bmp, 4000);                 // foto original (limitada a 4000 px)
+      var work = enhance(scaled(full, 1600));       // copia ligera para orientar y localizar la tarjeta
+      var first = !worker, stage = "Buscando la tarjeta…", base = 10, span = 40;
+      setProgress(first ? "Preparando el lector (solo la primera vez, unos segundos)…" : stage, 6);
       progressCb = function (m) {
-        if (m.status === "recognizing text") setProgress(stage + " " + Math.round(m.progress * 100) + "%", 20 + m.progress * 75 * share + done * 75);
-        else if (first && m.status) setProgress("Preparando el lector (solo la primera vez, unos segundos)…", 8 + (m.progress || 0) * 10);
+        if (m.status === "recognizing text") setProgress(stage, base + m.progress * span);
+        else if (first && m.status) setProgress("Preparando el lector (solo la primera vez, unos segundos)…", 6 + (m.progress || 0) * 4);
       };
       var w = await getWorker();
       if (cancelled) return;
-      // Las tarjetas son apaisadas: si la foto es vertical, está girada.
-      var tries = base.height > base.width ? [90, 270] : [0, 180];
-      var share = 1 / tries.length, done = 0, stage = "Leyendo…", best = null;
-      for (var t = 0; t < tries.length; t++) {
+
+      // 1) Orientación: se prueba derecha y, si no se lee bien, girada.
+      var order = [0, 90, 270, 180], best = null;
+      for (var t = 0; t < order.length; t++) {
         if (cancelled) return;
-        stage = tries.length > 1 ? "Leyendo (" + (t + 1) + " de " + tries.length + ")…" : "Leyendo…";
-        var cv = rotated(base, tries[t]);
-        var r = (await w.recognize(cv)).data;
-        if (!best || r.confidence > best.data.confidence) best = { data: r, canvas: cv };
-        done = (t + 1) * share;
-        if (tries[t] === 0 && r.confidence >= 70) break;
+        stage = t === 0 ? "Buscando la tarjeta…" : "Probando la foto girada…";
+        base = 10 + t * 10; span = 10;
+        var cv = rotated(work, order[t]);
+        var r = (await w.recognize(cv)).data, sc = score(r);
+        if (!best || sc > best.score) best = { data: r, score: sc, deg: order[t], canvas: cv };
+        if (best.score >= 40 && best.data.confidence >= 65) break;
       }
       if (cancelled) return;
-      var lines = (best.data.lines || []).map(function (l) { return { text: l.text, h: l.bbox ? l.bbox.y1 - l.bbox.y0 : 0 }; });
+
+      // 2) Recorte de la zona con texto sobre la foto original y lectura con detalle.
+      var ws = words(best.data).filter(function (x) { return x.confidence >= 60 && x.text.replace(/\W/g, "").length >= 2 && x.bbox; });
+      var finalData = best.data, finalCanvas = best.canvas;
+      // Solo si la letra sale pequeña (tarjeta lejos o foto con mucho fondo) se recorta y amplía.
+      var hs = ws.map(function (x) { return x.bbox.y1 - x.bbox.y0; }).sort(function (a, b) { return a - b; });
+      var smallText = hs.length ? hs[Math.floor(hs.length / 2)] < 30 : true;
+      if (ws.length >= 2 && smallText) {
+        var x0 = Infinity, y0 = Infinity, x1 = 0, y1 = 0;
+        ws.forEach(function (x) { x0 = Math.min(x0, x.bbox.x0); y0 = Math.min(y0, x.bbox.y0); x1 = Math.max(x1, x.bbox.x1); y1 = Math.max(y1, x.bbox.y1); });
+        var fullR = rotated(full, best.deg), k = fullR.width / best.canvas.width;
+        var m = 0.12 * Math.max(x1 - x0, y1 - y0) + 30;
+        var cx0 = Math.max(0, (x0 - m) * k), cy0 = Math.max(0, (y0 - m) * k);
+        var cx1 = Math.min(fullR.width, (x1 + m) * k), cy1 = Math.min(fullR.height, (y1 + m) * k);
+        var cw = cx1 - cx0, ch = cy1 - cy0, up = Math.min(3, 2600 / Math.max(cw, ch));
+        var crop = document.createElement("canvas"); crop.width = Math.round(cw * up); crop.height = Math.round(ch * up);
+        var cg = crop.getContext("2d"); cg.imageSmoothingQuality = "high"; cg.drawImage(fullR, cx0, cy0, cw, ch, 0, 0, crop.width, crop.height);
+        enhance(crop);
+        if (cancelled) return;
+        stage = "Leyendo con detalle…"; base = 55; span = 40;
+        var r2 = (await w.recognize(crop)).data;
+        if (score(r2) >= best.score * 0.9) { finalData = r2; finalCanvas = crop; }
+      } else if (!ws.length && best.score < 15) {
+        // Casi nada legible: se intenta igualmente con la foto original a más resolución.
+        stage = "Leyendo con detalle…"; base = 55; span = 40;
+        var big = enhance(scaled(rotated(full, best.deg), 2600));
+        var r3 = (await w.recognize(big)).data;
+        if (score(r3) > best.score) { finalData = r3; finalCanvas = big; }
+      }
+      if (cancelled) return;
+      setProgress("Ordenando los datos…", 98);
+      best = { data: finalData, canvas: finalCanvas };
+      var lines = linesFrom(best.data);
       if (!lines.length) lines = String(best.data.text || "").split("\n");
       var parsed = parseCard(lines);
       $("#busy").hidden = true;

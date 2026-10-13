@@ -35,8 +35,11 @@
       if (core.length === 1 && !/^[YyEeOoUuAa\d]$/.test(core)) return true;
       return false;
     }
+    // El símbolo de un icono (teléfono, sobre, globo, chincheta) se lee como una letra suelta: "O Avda. ..."
+    while (t.length > 1 && /^[A-Za-zÁÉÍÓÚÑ©®@&°•·*»«$%#~><=+]$/.test(t[0])) t.shift();
     while (t.length > 1 && junk(t[0])) t.shift();
     while (t.length > 1 && junk(t[t.length - 1])) t.pop();
+    while (t.length > 2 && /^[A-Za-zÑñ©®@&°•·*»«]$/.test(t[t.length - 1]) && !/^[yY]$/.test(t[t.length - 1])) t.pop();
     return t.join(" ");
   }
   function isUpper(s) { var l = s.replace(/[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ]/g, ""); return l.length > 1 && l === l.toUpperCase(); }
@@ -52,23 +55,31 @@
   function digits(s) { return s.replace(/\D/g, ""); }
 
   function fmtPhone(raw) {
-    var d = digits(raw), plus = /^\s*\+/.test(raw);
-    if (d.indexOf("0034") === 0) { d = d.slice(4); plus = true; d = "34" + d; }
-    if (plus && d.indexOf("34") === 0 && d.length === 11) return "+34 " + group(d.slice(2));
-    if (!plus && d.length === 9) return group(d);
-    return clean(raw);
+    var d = digits(raw), plus = /^\s*\+/.test(raw) || d.indexOf("0034") === 0;
+    var nat = national(d);
+    if (!plus && nat.length > 9 && /^[6789]/.test(nat)) nat = nat.slice(0, 9);   // una cifra suelta pegada al final
+    var printed = clean(raw.replace(/[.\-\/()]/g, " ")).replace(/^\+?\s*(00\s?)?34\s*/, "");
+    var groups = printed.split(" ");
+    var ok = digits(printed) === nat && groups.length >= 3 && groups.every(function (g) { return g.length >= 2 && g.length <= 3; });
+    var body = ok ? printed : (nat.length === 9 ? group(nat) : clean(raw));
+    return (plus ? "+34 " : "") + body;
   }
   function group(d9) {
-    if (/^[67]/.test(d9)) return d9.replace(/(\d{3})(\d{2})(\d{2})(\d{2})/, "$1 $2 $3 $4");
+    if (/^[67]/.test(d9)) return d9.replace(/(\d{3})(\d{3})(\d{3})/, "$1 $2 $3");
     return d9.replace(/(\d{2})(\d{3})(\d{2})(\d{2})/, "$1 $2 $3 $4");
   }
   function national(d) { if (d.indexOf("0034") === 0) return d.slice(4); if (d.indexOf("34") === 0 && d.length === 11) return d.slice(2); return d; }
 
   function parseCard(input) {
-    var lines = (input || []).map(function (l) {
-      var t = typeof l === "string" ? l : l.text;
-      return { text: trimJunk(clean(t)), h: typeof l === "string" ? 0 : +l.h || 0 };
-    }).filter(function (l) { return l.text.length > 1; });
+    var lines = [];
+    (input || []).forEach(function (l) {
+      var t = typeof l === "string" ? l : l.text, h = typeof l === "string" ? 0 : +l.h || 0;
+      // "Miguel Rus Palacios | (6 pe" -> dos trozos: el texto y el resto del logo
+      String(t || "").split(/\s[|¦]\s|\s{3,}|\t/).forEach(function (part) {
+        var x = trimJunk(clean(part));
+        if (x.length > 1) lines.push({ text: x, h: h });
+      });
+    });
     var all = lines.map(function (l) { return l.text; }).join("\n");
     var out = { nombre: "", apellidos: "", cargo: "", empresa: "", movil: "", telefono: "", email: "", web: "", direccion: "", revisar: [] };
     var used = {};
@@ -85,6 +96,20 @@
     var em = fixed.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/);
     if (em) out.email = em[0].replace(/^[._-]+/, "").toLowerCase();
     lines.forEach(function (l, i) { if (/@/.test(l.text)) used[i] = 1; });
+    if (!out.email && webDom) {
+      // Sin etiqueta: "mejemploGhormisur.com", "mejemplo hormisur.com", "mejemplo © hormisur.com"
+      var wd = webDom.toLowerCase();
+      lines.forEach(function (l, i) {
+        if (out.email || used[i] || /\bwww\./i.test(l.text)) return;
+        var low = l.text.replace(LABEL, ""), re = new RegExp("([A-Za-z0-9._%+-]+)\\s*(?:[^A-Za-z0-9\\s]|[GQ])?\\s*(" + wd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\.[a-z.]{2,})\\b", "i");
+        var m = low.match(re);
+        if (!m) return;
+        var local = m[1];
+        if (local.toLowerCase().slice(-wd.length) === wd) return;
+        if (/[A-Z]$/.test(local) && local.slice(0, -1) === local.slice(0, -1).toLowerCase() && local.length > 2) local = local.slice(0, -1);
+        out.email = (local + "@" + m[2]).toLowerCase(); out.revisar.push("email"); used[i] = 1;
+      });
+    }
     if (!out.email) {
       // La @ se pierde a menudo: se reconstruye desde la línea con la etiqueta e-mail
       lines.forEach(function (l, i) {
@@ -149,7 +174,7 @@
       if (used[i]) return;
       if (ADDRESS.test(l.text) && !CARGO.test(l.text.replace(/\b(edificio|planta)\b/ig, ""))) { addr.push(l.text.replace(LABEL, "")); used[i] = 1; }
     });
-    out.direccion = addr.join(", ").replace(/\s+,/g, ",").replace(/(\d)\s?\*/g, "$1ª");
+    out.direccion = addr.join(", ").replace(/\s+,/g, ",").replace(/(\d)\s?[*%]/g, "$1ª");
 
     // Empresa por palabra clave
     var companyIdx = -1;
@@ -212,6 +237,7 @@
       else { out.nombre = w[0]; out.apellidos = w.slice(1).join(" "); }
     }
     if (out.empresa && isUpper(out.empresa) && out.empresa.length > 6) out.empresa = titleCase(out.empresa);
+    if (out.empresa && out.empresa === out.empresa.toLowerCase()) out.empresa = out.empresa.charAt(0).toUpperCase() + out.empresa.slice(1);
     out.direccion = out.direccion ? nice(out.direccion) : "";
     return out;
   }
